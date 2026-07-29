@@ -24,31 +24,32 @@ Then just type:
 @
 ```
 
-`@code`, `atcode`, `at`, and `sonut` also work as aliases. On Windows
-PowerShell, use `atcode`: PowerShell reserves a leading `@` as language
-syntax. In `cmd.exe`, `@code` and `@` are available too.
+`@code`, `atcode`, and `at` also work. On Windows PowerShell, use `atcode` or
+`at`: PowerShell reserves a leading `@` as language syntax. In `cmd.exe`,
+`@code` and `@` are available too.
+
+The installer verifies every download, installs the platform sandbox helpers,
+and places the inference runtime under the generic
+`~/.atcode/engine/atcode-server` name. Existing installations using the older
+runtime layout are migrated without deleting models or settings.
 
 ## Repository layout
 
 - `install/install.sh` — macOS / Linux / WSL installer
 - `install/install.ps1` — Windows installer
-- `bin/` — prebuilt @code binaries:
-  - `at-darwin-arm64` (Apple Silicon)
-  - `@code-darwin-arm64` (Apple Silicon alias)
-  - `at-darwin-amd64` (Intel Mac)
-  - `@code-darwin-amd64` (Intel Mac alias)
-  - `at-linux-amd64`
-  - `@code-linux-amd64`
-  - `at-linux-arm64`
-  - `@code-linux-arm64`
-  - `at-windows-amd64.exe`
-  - `@code-windows-amd64.exe`
+- `bin/` — checksum-verified prebuilt @code binaries and required sandbox
+  helpers for:
+  - macOS: Apple Silicon and Intel
+  - Linux and WSL: ARM64 and x86-64
+  - Windows: ARM64 and x86-64
+- `bin/SHA256SUMS` — integrity manifest consumed by both installers
 
 ## Requirements
 
 - 8 GB+ RAM
 - ~4.8 GB free disk space (binary + model)
-- macOS 12+, Windows 10+ (64-bit), or a modern Linux distro
+- macOS 12+, Windows 10+ (64-bit), or a modern Linux distribution
+- Node.js 18+ is recommended for the built-in MCP and browser automation tools
 
 ## Support
 

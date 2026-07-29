@@ -3,244 +3,264 @@
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/aslam-anees/at-code/src/install/install.sh | bash
-#
-# What it does:
-#   1. Detects OS/arch.
-#   2. Installs the @code binary ("at") to ~/.atcode/bin — from GitHub releases
-#      when available, otherwise from the prebuilt binaries committed in this
-#      repository (bin/at-<os>-<arch>).
-#   3. Installs the server build (with a compatible fallback).
-#   4. Adds ~/.atcode/bin to PATH.
-#   The @0.1 model auto-downloads to ~/.atcode/model on first run.
 set -euo pipefail
 
-# ---- Configuration ----------------------------------------------------------
-REPO="${AT_INSTALL_REPO:-aslam-anees/at-code}"
-BRANCH="${AT_INSTALL_BRANCH:-src}"
-INSTALL_DIR="${AT_INSTALL_DIR:-$HOME/.atcode/bin}"
-LLAMA_REPO="ggml-org/llama.cpp"
-PRISM_REPO="${AT_PRISM_REPO:-PrismML-Eng/llama.cpp}"
-PRISM_DIR="${AT_PRISM_DIR:-$HOME/.atcode/prism-llama.cpp}"
-# -----------------------------------------------------------------------------
+ATCODE_REPOSITORY="${ATCODE_INSTALL_REPO:-${AT_INSTALL_REPO:-aslam-anees/at-code}}"
+ATCODE_BRANCH="${ATCODE_INSTALL_BRANCH:-${AT_INSTALL_BRANCH:-src}}"
+ATCODE_INSTALL_DIR="${ATCODE_INSTALL_DIR:-${AT_INSTALL_DIR:-$HOME/.atcode/bin}}"
+ATCODE_ENGINE_DIR="${ATCODE_ENGINE_DIR:-$HOME/.atcode/engine}"
+ATCODE_ENGINE_REPOSITORY="${ATCODE_ENGINE_REPO:-ggml-org/llama.cpp}"
+ATCODE_GITHUB_API="${ATCODE_GITHUB_API:-https://api.github.com}"
+ATCODE_BINARY_BASE_URL="${ATCODE_BINARY_BASE_URL:-https://raw.githubusercontent.com/${ATCODE_REPOSITORY}/${ATCODE_BRANCH}/bin}"
 
-info()  { printf '\033[1;34m==>\033[0m %s\n' "$1"; }
-warn()  { printf '\033[1;33mwarn:\033[0m %s\n' "$1" >&2; }
-error() { printf '\033[1;31merror:\033[0m %s\n' "$1" >&2; exit 1; }
+info() {
+  printf '\033[1;34m==>\033[0m %s\n' "$1"
+}
+
+warn() {
+  printf '\033[1;33mwarn:\033[0m %s\n' "$1" >&2
+}
+
+fail() {
+  printf '\033[1;31merror:\033[0m %s\n' "$1" >&2
+  exit 1
+}
+
+download() {
+  local url="$1"
+  local output="$2"
+  if command -v curl >/dev/null 2>&1; then
+    curl --fail --location --retry 3 --show-error --silent "$url" --output "$output"
+  elif command -v wget >/dev/null 2>&1; then
+    wget --quiet --tries=3 "$url" --output-document="$output"
+  else
+    fail "curl or wget is required"
+  fi
+}
 
 detect_platform() {
   local os arch
   case "$(uname -s)" in
     Darwin) os="darwin" ;;
-    Linux)  os="linux" ;;
-    *) error "Unsupported OS: $(uname -s). On Windows, use install.ps1 instead." ;;
+    Linux) os="linux" ;;
+    *) fail "Unsupported operating system: $(uname -s). Use install.ps1 on Windows." ;;
   esac
   case "$(uname -m)" in
     x86_64|amd64) arch="amd64" ;;
     arm64|aarch64) arch="arm64" ;;
-    *) error "Unsupported architecture: $(uname -m)" ;;
+    *) fail "Unsupported architecture: $(uname -m)" ;;
   esac
-  echo "${os}-${arch}"
+  printf '%s-%s\n' "$os" "$arch"
 }
 
-download() {
-  local url="$1" dest="$2"
-  if command -v curl >/dev/null 2>&1; then
-    curl -fL --retry 3 --progress-bar "$url" -o "$dest"
-  elif command -v wget >/dev/null 2>&1; then
-    wget -q --tries=3 "$url" -O "$dest"
+calculate_sha256() {
+  local path="$1"
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$path" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$path" | awk '{print $1}'
+  elif command -v openssl >/dev/null 2>&1; then
+    openssl dgst -sha256 "$path" | awk '{print $NF}'
   else
-    error "curl or wget is required to install @code"
+    fail "sha256sum, shasum, or openssl is required to verify @code"
   fi
 }
 
-# Fetch a URL's body to stdout with whichever downloader exists.
-fetch() {
-  local url="$1"
-  if command -v curl >/dev/null 2>&1; then
-    curl -fsSL "$url" 2>/dev/null
-  elif command -v wget >/dev/null 2>&1; then
-    wget -q -O - "$url" 2>/dev/null
-  fi
+verify_download() {
+  local source_name="$1"
+  local path="$2"
+  local expected actual
+  expected="$(awk -v name="$source_name" '$2 == name { print $1; exit }' "$checksum_manifest")"
+  [ -n "$expected" ] || fail "No checksum is published for $source_name"
+  actual="$(calculate_sha256 "$path")"
+  [ "$actual" = "$expected" ] || fail "Checksum verification failed for $source_name"
 }
 
-# Fetch the download URL of the first release asset whose name matches $1.
-latest_asset_url() {
-  local repo="$1" pattern="$2"
-  fetch "https://api.github.com/repos/${repo}/releases/latest" |
-    grep -o '"browser_download_url": *"[^"]*"' |
-    cut -d'"' -f4 |
-    grep -m1 "$pattern" || true
+install_repository_binary() {
+  local source_name="$1"
+  local installed_name="$2"
+  local downloaded="$tmp_dir/$source_name"
+  download "${ATCODE_BINARY_BASE_URL%/}/$source_name" "$downloaded"
+  verify_download "$source_name" "$downloaded"
+  cp "$downloaded" "$ATCODE_INSTALL_DIR/$installed_name"
+  chmod 755 "$ATCODE_INSTALL_DIR/$installed_name"
 }
 
-install_at() {
-  local platform="$1" tmp_dir="$2" asset_url raw_url
-
-  asset_url="$(latest_asset_url "$REPO" "at-${platform}")"
-  if [[ -n "$asset_url" ]]; then
-    info "Downloading @code (${platform}) from GitHub releases"
-    download "$asset_url" "$tmp_dir/at"
-  else
-    raw_url="https://raw.githubusercontent.com/${REPO}/${BRANCH}/bin/at-${platform}"
-    info "Downloading @code (${platform})"
-    download "$raw_url" "$tmp_dir/at" ||
-      error "Could not download the @code binary for ${platform}."
-  fi
-
-  install -m 0755 "$tmp_dir/at" "$INSTALL_DIR/at"
-  ln -sf "$INSTALL_DIR/at" "$INSTALL_DIR/@"
-  ln -sf "$INSTALL_DIR/at" "$INSTALL_DIR/@code"
-  ln -sf "$INSTALL_DIR/at" "$INSTALL_DIR/atcode"
-
-  # Smoke-test the installed binary so a truncated download or wrong-arch
-  # binary fails loudly here instead of confusing the user later.
-  if ! "$INSTALL_DIR/at" --version >/dev/null 2>&1; then
-    error "The installed @code binary failed to run (platform ${platform}). Re-run the installer; if it persists, report it at https://github.com/${REPO}/issues"
-  fi
-  info "Verified: $("$INSTALL_DIR/at" --version)"
+latest_engine_asset_url() {
+  local pattern="$1"
+  local metadata="$tmp_dir/engine-release.json"
+  download "${ATCODE_GITHUB_API%/}/repos/${ATCODE_ENGINE_REPOSITORY}/releases/latest" "$metadata"
+  sed -n 's/.*"browser_download_url"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$metadata" |
+    grep -E -m1 "$pattern" || true
 }
 
-install_upstream_llama_server() {
-  # Already present? Done.
-  if command -v llama-server >/dev/null 2>&1 || [[ -x "$INSTALL_DIR/llama-server" ]]; then
-    info "Server already installed"
+next_available_path() {
+  local preferred="$1"
+  local candidate="$preferred"
+  local index=2
+  while [ -e "$candidate" ]; do
+    candidate="${preferred}-${index}"
+    index=$((index + 1))
+  done
+  printf '%s\n' "$candidate"
+}
+
+migrate_legacy_engine() {
+  # Preserve installations created before the generic engine layout.
+  local legacy_root="$HOME/.atcode/prism-llama.cpp"
+  if [ -d "$legacy_root" ]; then
+    local destination="$ATCODE_ENGINE_DIR"
+    if [ -e "$destination" ]; then
+      destination="$(next_available_path "$ATCODE_ENGINE_DIR/compat-runtime")"
+    fi
+    mkdir -p "$(dirname "$destination")"
+    mv "$legacy_root" "$destination"
+  fi
+
+  local old_path new_path
+  while IFS= read -r old_path; do
+    [ -n "$old_path" ] || continue
+    new_path="$(dirname "$old_path")/atcode-server"
+    if [ -e "$new_path" ]; then
+      new_path="$(next_available_path "$(dirname "$old_path")/atcode-server-compat")"
+    fi
+    mv "$old_path" "$new_path"
+  done < <(
+    {
+      [ -f "$ATCODE_INSTALL_DIR/llama-server" ] && printf '%s\n' "$ATCODE_INSTALL_DIR/llama-server"
+      find "$ATCODE_ENGINE_DIR" -type f -name llama-server -print 2>/dev/null || true
+    }
+  )
+}
+
+find_installed_engine() {
+  local candidate
+  for candidate in \
+    "$ATCODE_ENGINE_DIR/atcode-server" \
+    "$ATCODE_ENGINE_DIR/bin/atcode-server" \
+    "$ATCODE_ENGINE_DIR/build/bin/atcode-server"; do
+    if [ -x "$candidate" ]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+install_engine() {
+  local platform="$1"
+  local installed_engine
+  if installed_engine="$(find_installed_engine)"; then
+    info "Verified engine: $installed_engine"
     return
   fi
-
-  # macOS: Homebrew is the best-maintained path (Metal build, auto-updates).
-  if [[ "$(uname -s)" == "Darwin" ]] && command -v brew >/dev/null 2>&1; then
-    info "Installing server"
-    brew install llama.cpp && return
-    warn "Homebrew install failed; falling back to GitHub release binaries"
-  fi
-
   local pattern
-  case "$(uname -s)-$(uname -m)" in
-    Darwin-arm64)          pattern='bin-macos-arm64\.tar\.gz' ;;
-    Darwin-x86_64)         pattern='bin-macos-x64\.tar\.gz' ;;
-    Linux-x86_64)          pattern='bin-ubuntu-x64\.tar\.gz' ;;
-    Linux-arm64|Linux-aarch64) pattern='bin-ubuntu-arm64\.tar\.gz' ;;
-    *) warn "No prebuilt llama-server for this platform; install llama.cpp manually (https://github.com/${LLAMA_REPO})"; return ;;
-  esac
-
-  local url tmp_archive extract_dir server_bin
-  url="$(latest_asset_url "$LLAMA_REPO" "$pattern")"
-  [[ -n "$url" ]] || { warn "Could not find a llama.cpp release asset; install it manually"; return; }
-
-  info "Downloading server"
-  tmp_archive="$(mktemp -d)/llama.tar.gz"
-  download "$url" "$tmp_archive"
-  extract_dir="$(mktemp -d)"
-  if ! tar -xzf "$tmp_archive" -C "$extract_dir"; then
-    warn "Server archive could not be extracted"
-    rm -rf "$extract_dir" "$(dirname "$tmp_archive")"
-    return
-  fi
-  # Release archives place binaries under build/bin/ (layout has varied); find it.
-  server_bin="$(find "$extract_dir" -name llama-server -type f | head -1)"
-  [[ -n "$server_bin" ]] || { warn "llama-server not found inside the release archive; install llama.cpp manually"; rm -rf "$extract_dir" "$(dirname "$tmp_archive")"; return; }
-  # Copy every sibling binary + shared libs so llama-server's dylib/so lookups work.
-  cp -R "$(dirname "$server_bin")/." "$INSTALL_DIR/"
-  chmod +x "$INSTALL_DIR/llama-server"
-  rm -rf "$extract_dir" "$(dirname "$tmp_archive")"
-  info "Installed server"
-}
-
-install_prism_llama_server() {
-  local platform="$1" pattern url tmp_archive extract_dir server_bin server_dir prism_bin
-  prism_bin="$PRISM_DIR/build/bin"
-
-  if [[ -x "$prism_bin/llama-server" || -x "$prism_bin/llama-server.exe" ]]; then
-    info "Server already installed"
-    return 0
-  fi
-
   case "$platform" in
-    darwin-arm64) pattern='llama-prism-.*-bin-macos-arm64\.tar\.gz' ;;
-    darwin-amd64) pattern='llama-prism-.*-bin-macos-x64\.tar\.gz' ;;
-    linux-amd64)  pattern='llama-prism-.*-bin-ubuntu-x64\.tar\.gz' ;;
-    linux-arm64)  pattern='llama-prism-.*-bin-ubuntu-arm64\.tar\.gz' ;;
-    *)
-      warn "No server release for ${platform}; trying a compatible fallback"
-      install_upstream_llama_server
-      return
-      ;;
+    darwin-arm64) pattern='bin-macos-arm64\.tar\.gz$' ;;
+    darwin-amd64) pattern='bin-macos-x64\.tar\.gz$' ;;
+    linux-arm64) pattern='bin-ubuntu-arm64\.tar\.gz$' ;;
+    linux-amd64) pattern='bin-ubuntu-x64\.tar\.gz$' ;;
+    *) fail "No @code engine is available for $platform" ;;
   esac
 
-  url="$(latest_asset_url "$PRISM_REPO" "$pattern")"
-  if [[ -z "$url" ]]; then
-    warn "Could not find a server release for ${platform}; trying a compatible fallback"
-    install_upstream_llama_server
-    return
-  fi
+  local engine_url engine_archive engine_extract source_server source_dir
+  engine_url="$(latest_engine_asset_url "$pattern")"
+  [ -n "$engine_url" ] || fail "Could not resolve an @code engine for $platform"
+  engine_archive="$tmp_dir/atcode-engine.tar.gz"
+  engine_extract="$tmp_dir/engine-extract"
+  mkdir -p "$engine_extract"
+  info "Downloading the @code engine"
+  download "$engine_url" "$engine_archive"
+  tar -xzf "$engine_archive" -C "$engine_extract" ||
+    fail "The @code engine archive could not be extracted"
+  source_server="$(find "$engine_extract" -type f -name llama-server -print -quit)"
+  [ -n "$source_server" ] || fail "The @code engine archive was incomplete"
+  source_dir="$(dirname "$source_server")"
 
-  info "Downloading server"
-  tmp_archive="$(mktemp -d)/prism-llama.tar.gz"
-  extract_dir="$(mktemp -d)"
-  if ! download "$url" "$tmp_archive"; then
-    warn "Server download failed; trying a compatible fallback"
-    rm -rf "$extract_dir" "$(dirname "$tmp_archive")"
-    install_upstream_llama_server
-    return
-  fi
-  if ! tar -xzf "$tmp_archive" -C "$extract_dir"; then
-    warn "Server archive could not be extracted; trying a compatible fallback"
-    rm -rf "$extract_dir" "$(dirname "$tmp_archive")"
-    install_upstream_llama_server
-    return
-  fi
-  server_bin="$(find "$extract_dir" -type f -name 'llama-server' | head -1)"
-  [[ -n "$server_bin" ]] || {
-    warn "Server was not found in the archive; trying a compatible fallback"
-    rm -rf "$extract_dir" "$(dirname "$tmp_archive")"
-    install_upstream_llama_server
-    return
-  }
-  server_dir="$(dirname "$server_bin")"
-  mkdir -p "$prism_bin"
-  cp -R "$server_dir/." "$prism_bin/"
-  # Keep the Prism binary on the install PATH as well. This covers non-TUI
-  # entry points and Windows, where the executable suffix is .exe.
-  cp -R "$server_dir/." "$INSTALL_DIR/"
-  chmod +x "$prism_bin/llama-server" "$INSTALL_DIR/llama-server"
-  rm -rf "$extract_dir" "$(dirname "$tmp_archive")"
-  info "Installed server"
+  mkdir -p "$ATCODE_ENGINE_DIR"
+  cp "$source_server" "$ATCODE_ENGINE_DIR/atcode-server"
+  chmod 755 "$ATCODE_ENGINE_DIR/atcode-server"
+  find "$source_dir" -maxdepth 1 \( -type f -o -type l \) \
+    \( -name '*.so' -o -name '*.so.*' -o -name '*.dylib' \) \
+    -exec cp -P {} "$ATCODE_ENGINE_DIR/" \;
+
+  "$ATCODE_ENGINE_DIR/atcode-server" --version >/dev/null 2>&1 ||
+    fail "The installed @code engine failed its verification check"
+  info "Verified engine: $ATCODE_ENGINE_DIR/atcode-server"
 }
 
 setup_path() {
-  [[ ":$PATH:" == *":${INSTALL_DIR}:"* ]] && return
-  local shell_rc
-  case "$(basename "${SHELL:-}")" in
-    zsh)  shell_rc="$HOME/.zshrc" ;;
-    bash) shell_rc="$HOME/.bashrc" ;;
-    *)    shell_rc="$HOME/.profile" ;;
+  case ":$PATH:" in
+    *":$ATCODE_INSTALL_DIR:"*) return ;;
   esac
-  {
-    echo ''
-    echo '# Added by @code installer'
-    echo "export PATH=\"${INSTALL_DIR}:\$PATH\""
-  } >> "$shell_rc"
-  info "Added @code commands to your PATH"
-  info "Open a new terminal, then type '@code', '@', or 'atcode'"
+  if [ "${ATCODE_NO_PATH_UPDATE:-0}" = "1" ]; then
+    info "Add $ATCODE_INSTALL_DIR to PATH to run @code from any directory"
+    return
+  fi
+
+  local shell_rc path_line
+  case "$(basename "${SHELL:-}")" in
+    zsh) shell_rc="$HOME/.zshrc" ;;
+    bash) shell_rc="$HOME/.bashrc" ;;
+    *) shell_rc="$HOME/.profile" ;;
+  esac
+  path_line="export PATH=\"$ATCODE_INSTALL_DIR:\$PATH\""
+  if [ ! -f "$shell_rc" ] || ! grep -Fqx "$path_line" "$shell_rc"; then
+    {
+      printf '\n'
+      printf '%s\n' '# Added by @code installer'
+      printf '%s\n' "$path_line"
+    } >>"$shell_rc"
+  fi
+  export PATH="$ATCODE_INSTALL_DIR:$PATH"
+  info "Added $ATCODE_INSTALL_DIR to PATH in $shell_rc"
 }
 
 main() {
-  [[ -n "${HOME:-}" ]] || error "\$HOME is not set; cannot pick an install directory"
-  tmp_dir="$(mktemp -d)"
+  [ -n "${HOME:-}" ] || fail "\$HOME is not set"
+  command -v uname >/dev/null 2>&1 || fail "uname is required"
+  command -v awk >/dev/null 2>&1 || fail "awk is required"
+  command -v tar >/dev/null 2>&1 || fail "tar is required"
+
+  tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/atcode-install.XXXXXX")"
   trap 'rm -rf "$tmp_dir"' EXIT
+  checksum_manifest="$tmp_dir/SHA256SUMS"
 
   local platform
   platform="$(detect_platform)"
-  info "Detected platform: ${platform}"
+  info "Detected platform: $platform"
+  mkdir -p "$ATCODE_INSTALL_DIR" "$HOME/.atcode/model"
 
-  mkdir -p "$INSTALL_DIR" "$HOME/.atcode/model"
+  download "${ATCODE_BINARY_BASE_URL%/}/SHA256SUMS" "$checksum_manifest"
+  install_repository_binary "at-${platform}" at
+  ln -sfn at "$ATCODE_INSTALL_DIR/atcode"
+  ln -sfn at "$ATCODE_INSTALL_DIR/@code"
+  ln -sfn at "$ATCODE_INSTALL_DIR/@"
 
-  install_at "$platform" "$tmp_dir"
-  install_prism_llama_server "$platform"
+  case "$platform" in
+    linux-*)
+      install_repository_binary "atcode-linux-sandbox-${platform}" atcode-linux-sandbox
+      install_repository_binary "atcode-seccomp-${platform}" atcode-seccomp
+      ;;
+  esac
+
+  if ! "$ATCODE_INSTALL_DIR/at" --version >/dev/null 2>&1; then
+    fail "The installed @code binary failed to run on $platform"
+  fi
+  info "Verified: $("$ATCODE_INSTALL_DIR/at" --version)"
+
+  if [ "${ATCODE_SKIP_ENGINE:-0}" != "1" ]; then
+    migrate_legacy_engine
+    install_engine "$platform"
+  fi
   setup_path
 
-  echo ""
-  info "Installation complete. Just type '@', '@code', or 'atcode' to get started."
-  info "On first run the @0.1 model auto-downloads (~4.8 GB)."
+  if ! command -v npx >/dev/null 2>&1; then
+    warn "Node.js 18+ is recommended for built-in MCP and browser automation tools"
+  fi
+  printf '\n'
+  info "Installation complete. Run '@code', '@', 'atcode', or 'at'."
+  info "On first run, @code downloads its local model."
 }
 
 main "$@"
