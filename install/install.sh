@@ -9,9 +9,12 @@ ATCODE_REPOSITORY="${ATCODE_INSTALL_REPO:-${AT_INSTALL_REPO:-aslam-anees/at-code
 ATCODE_BRANCH="${ATCODE_INSTALL_BRANCH:-${AT_INSTALL_BRANCH:-src}}"
 ATCODE_INSTALL_DIR="${ATCODE_INSTALL_DIR:-${AT_INSTALL_DIR:-$HOME/.atcode/bin}}"
 ATCODE_ENGINE_DIR="${ATCODE_ENGINE_DIR:-$HOME/.atcode/engine}"
-ATCODE_ENGINE_REPOSITORY="${ATCODE_ENGINE_REPO:-ggml-org/llama.cpp}"
+ATCODE_ENGINE_REPOSITORY="${ATCODE_ENGINE_REPO:-PrismML-Eng/llama.cpp}"
+ATCODE_VOICE_BIN_DIR="${ATCODE_VOICE_BIN_DIR:-$HOME/.atcode/voice/bin}"
 ATCODE_GITHUB_API="${ATCODE_GITHUB_API:-https://api.github.com}"
 ATCODE_BINARY_BASE_URL="${ATCODE_BINARY_BASE_URL:-https://raw.githubusercontent.com/${ATCODE_REPOSITORY}/${ATCODE_BRANCH}/bin}"
+ATCODE_TERMINAL_BROWSER_INSTALL_URL="${ATCODE_TERMINAL_BROWSER_INSTALL_URL:-https://terminal-browser.com/install}"
+ATCODE_TERMINAL_BROWSER_BIN_DIR="${ATCODE_TERMINAL_BROWSER_BIN_DIR:-${XDG_BIN_HOME:-$HOME/.local/bin}}"
 
 info() {
   printf '\033[1;34m==>\033[0m %s\n' "$1"
@@ -86,6 +89,26 @@ install_repository_binary() {
   chmod 755 "$ATCODE_INSTALL_DIR/$installed_name"
 }
 
+install_voice_helper() {
+  [ "${ATCODE_SKIP_VOICE_HELPER:-0}" != "1" ] || return
+  local platform="$1"
+  local source_name="atcode-voice-${platform}"
+  case "$platform" in
+    windows-*) source_name="${source_name}.exe" ;;
+  esac
+  if ! awk -v name="$source_name" '$2 == name { found=1 } END { exit !found }' "$checksum_manifest"; then
+    return
+  fi
+
+  local downloaded="$tmp_dir/$source_name"
+  download "${ATCODE_BINARY_BASE_URL%/}/$source_name" "$downloaded"
+  verify_download "$source_name" "$downloaded"
+  mkdir -p "$ATCODE_VOICE_BIN_DIR"
+  cp "$downloaded" "$ATCODE_VOICE_BIN_DIR/atcode-voice"
+  chmod 755 "$ATCODE_VOICE_BIN_DIR/atcode-voice"
+  info "Installed optional voice helper"
+}
+
 latest_engine_asset_url() {
   local pattern="$1"
   local metadata="$tmp_dir/engine-release.json"
@@ -151,8 +174,11 @@ install_engine() {
   local platform="$1"
   local installed_engine
   if installed_engine="$(find_installed_engine)"; then
-    info "Verified engine: $installed_engine"
-    return
+    if "$installed_engine" --help >/dev/null 2>&1; then
+      info "Server already installed"
+      return
+    fi
+    warn "Existing server failed verification; reinstalling it"
   fi
   local pattern
   case "$platform" in
@@ -169,7 +195,7 @@ install_engine() {
   engine_archive="$tmp_dir/atcode-engine.tar.gz"
   engine_extract="$tmp_dir/engine-extract"
   mkdir -p "$engine_extract"
-  info "Downloading the @code engine"
+  info "Downloading server"
   download "$engine_url" "$engine_archive"
   tar -xzf "$engine_archive" -C "$engine_extract" ||
     fail "The @code engine archive could not be extracted"
@@ -184,9 +210,9 @@ install_engine() {
     \( -name '*.so' -o -name '*.so.*' -o -name '*.dylib' \) \
     -exec cp -P {} "$ATCODE_ENGINE_DIR/" \;
 
-  "$ATCODE_ENGINE_DIR/atcode-server" --version >/dev/null 2>&1 ||
+  "$ATCODE_ENGINE_DIR/atcode-server" --help >/dev/null 2>&1 ||
     fail "The installed @code engine failed its verification check"
-  info "Verified engine: $ATCODE_ENGINE_DIR/atcode-server"
+  info "Installed server"
 }
 
 setup_path() {
@@ -194,7 +220,7 @@ setup_path() {
     *":$ATCODE_INSTALL_DIR:"*) return ;;
   esac
   if [ "${ATCODE_NO_PATH_UPDATE:-0}" = "1" ]; then
-    info "Add $ATCODE_INSTALL_DIR to PATH to run @code from any directory"
+    info "Add the @code command directory to PATH"
     return
   fi
 
@@ -213,7 +239,94 @@ setup_path() {
     } >>"$shell_rc"
   fi
   export PATH="$ATCODE_INSTALL_DIR:$PATH"
-  info "Added $ATCODE_INSTALL_DIR to PATH in $shell_rc"
+  info "Added @code commands to PATH"
+}
+
+setup_terminal_browser_path() {
+  local shell_rc path_line
+  case "$(basename "${SHELL:-}")" in
+    zsh) shell_rc="$HOME/.zshrc" ;;
+    bash) shell_rc="$HOME/.bashrc" ;;
+    *) shell_rc="$HOME/.profile" ;;
+  esac
+  path_line="export PATH=\"$ATCODE_TERMINAL_BROWSER_BIN_DIR:\$PATH\""
+  if [ -f "$shell_rc" ] && grep -Fqx "$path_line" "$shell_rc"; then
+    export PATH="$ATCODE_TERMINAL_BROWSER_BIN_DIR:$PATH"
+    return
+  fi
+  if [ "${ATCODE_NO_PATH_UPDATE:-0}" = "1" ]; then
+    info "Add the terminal-browser command directory to PATH"
+    return
+  fi
+
+  if [ ! -f "$shell_rc" ] || ! grep -Fqx "$path_line" "$shell_rc"; then
+    {
+      printf '\n'
+      printf '%s\n' '# Added by @code installer for terminal-browser'
+      printf '%s\n' "$path_line"
+    } >>"$shell_rc"
+  fi
+  export PATH="$ATCODE_TERMINAL_BROWSER_BIN_DIR:$PATH"
+  info "Added terminal-browser to PATH"
+}
+
+verify_terminal_browser() {
+  local binary="$1"
+  [ -x "$binary" ] || return 1
+  "$binary" help >/dev/null 2>&1
+}
+
+install_terminal_browser() {
+  if [ "${ATCODE_SKIP_TERMINAL_BROWSER:-0}" = "1" ]; then
+    return
+  fi
+
+  case "$1" in
+    darwin-arm64)
+      ;;
+    *)
+      return
+      ;;
+  esac
+
+  export PATH="$ATCODE_TERMINAL_BROWSER_BIN_DIR:$PATH"
+  local existing
+  existing="$(command -v terminal-browser 2>/dev/null || true)"
+  if [ -n "$existing" ] && verify_terminal_browser "$existing"; then
+    info "Verified terminal-browser"
+    return
+  fi
+  if verify_terminal_browser "$ATCODE_TERMINAL_BROWSER_BIN_DIR/terminal-browser"; then
+    info "Verified terminal-browser"
+    return
+  fi
+
+  case "$1" in
+    darwin-arm64)
+      command -v node >/dev/null 2>&1 || {
+        warn "terminal-browser needs Node.js 18+; install Node.js and rerun the installer"
+        return
+      }
+      command -v curl >/dev/null 2>&1 || {
+        warn "curl is required to install terminal-browser; install curl and rerun the installer"
+        return
+      }
+      info "Installing terminal-browser for Apple Silicon macOS"
+      if ! (
+        export XDG_BIN_HOME="$ATCODE_TERMINAL_BROWSER_BIN_DIR"
+        curl --fail --location --retry 3 --show-error --silent "$ATCODE_TERMINAL_BROWSER_INSTALL_URL" | bash
+      ); then
+        warn "Optional terminal-browser installation failed; @code installation will continue"
+        return
+      fi
+      if ! verify_terminal_browser "$ATCODE_TERMINAL_BROWSER_BIN_DIR/terminal-browser"; then
+        warn "Optional terminal-browser verification failed; @code installation will continue"
+        return
+      fi
+      info "Verified terminal-browser"
+      setup_terminal_browser_path
+      ;;
+  esac
 }
 
 main() {
@@ -236,6 +349,7 @@ main() {
   ln -sfn at "$ATCODE_INSTALL_DIR/atcode"
   ln -sfn at "$ATCODE_INSTALL_DIR/@code"
   ln -sfn at "$ATCODE_INSTALL_DIR/@"
+  install_voice_helper "$platform"
 
   case "$platform" in
     linux-*)
@@ -254,12 +368,13 @@ main() {
     install_engine "$platform"
   fi
   setup_path
+  install_terminal_browser "$platform"
 
   if ! command -v npx >/dev/null 2>&1; then
     warn "Node.js 18+ is recommended for built-in MCP and browser automation tools"
   fi
   printf '\n'
-  info "Installation complete. Run '@code', '@', 'atcode', or 'at'."
+  info "Installation complete. Type '@', '@code', or 'atcode' to start."
   info "On first run, @code downloads its local model."
 }
 

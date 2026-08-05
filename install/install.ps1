@@ -22,7 +22,9 @@ $InstallDir = if ($env:ATCODE_INSTALL_DIR) { $env:ATCODE_INSTALL_DIR }
 $EngineDir = if ($env:ATCODE_ENGINE_DIR) { $env:ATCODE_ENGINE_DIR }
               else { Join-Path $env:USERPROFILE '.atcode\engine' }
 $EngineRepository = if ($env:ATCODE_ENGINE_REPO) { $env:ATCODE_ENGINE_REPO }
-                     else { 'ggml-org/llama.cpp' }
+                     else { 'PrismML-Eng/llama.cpp' }
+$VoiceBinDir = if ($env:ATCODE_VOICE_BIN_DIR) { $env:ATCODE_VOICE_BIN_DIR }
+               else { Join-Path $env:USERPROFILE '.atcode\voice\bin' }
 $GitHubApi = if ($env:ATCODE_GITHUB_API) { $env:ATCODE_GITHUB_API }
               else { 'https://api.github.com' }
 $BinaryBaseUrl = if ($env:ATCODE_BINARY_BASE_URL) { $env:ATCODE_BINARY_BASE_URL.TrimEnd('/') }
@@ -76,7 +78,8 @@ function Get-ExpectedChecksum {
 function Install-RepositoryBinary {
     param(
         [string]$SourceName,
-        [string]$InstalledName
+        [string]$InstalledName,
+        [string]$DestinationDirectory = $InstallDir
     )
     $downloaded = Join-Path $TempDir $SourceName
     Invoke-WebRequest -Uri "$BinaryBaseUrl/$SourceName" -OutFile $downloaded -UseBasicParsing
@@ -85,7 +88,30 @@ function Install-RepositoryBinary {
     if ($actual -ne $expected) {
         Fail "Checksum verification failed for $SourceName"
     }
-    Copy-Item -Path $downloaded -Destination (Join-Path $InstallDir $InstalledName) -Force
+    New-Item -ItemType Directory -Path $DestinationDirectory -Force | Out-Null
+    Copy-Item -Path $downloaded `
+        -Destination (Join-Path $DestinationDirectory $InstalledName) -Force
+}
+
+function Test-PublishedBinary {
+    param([string]$FileName)
+    foreach ($line in Get-Content -Path $ChecksumManifest) {
+        $parts = $line.Trim() -split '\s+', 2
+        if ($parts.Count -eq 2 -and $parts[1].TrimStart('*') -eq $FileName) {
+            return $true
+        }
+    }
+    return $false
+}
+
+function Install-VoiceHelper {
+    param([string]$PlatformName)
+    if ($env:ATCODE_SKIP_VOICE_HELPER -eq '1') { return }
+    $sourceName = "atcode-voice-$PlatformName.exe"
+    if (-not (Test-PublishedBinary -FileName $sourceName)) { return }
+    Install-RepositoryBinary -SourceName $sourceName `
+        -InstalledName 'atcode-voice.exe' -DestinationDirectory $VoiceBinDir
+    Info 'Installed optional voice helper'
 }
 
 function Get-AvailablePath {
@@ -147,8 +173,14 @@ function Install-AtCodeEngine {
 
     $installedEngine = Find-InstalledEngine
     if ($installedEngine) {
-        Info "Verified engine: $installedEngine"
-        return
+        try {
+            & $installedEngine --help *> $null
+            if ($LASTEXITCODE -eq 0) {
+                Info 'Server already installed'
+                return
+            }
+        } catch {}
+        Warn 'Existing server failed verification; reinstalling it'
     }
     $release = Invoke-RestMethod `
         -Uri "$($GitHubApi.TrimEnd('/'))/repos/$EngineRepository/releases/latest" `
@@ -168,7 +200,7 @@ function Install-AtCodeEngine {
 
     $engineArchive = Join-Path $TempDir 'atcode-engine.zip'
     $engineExtract = Join-Path $TempDir 'engine-extract'
-    Info 'Downloading the @code engine'
+    Info 'Downloading server'
     Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $engineArchive -UseBasicParsing
     Expand-Archive -Path $engineArchive -DestinationPath $engineExtract -Force
     $sourceServer = Get-ChildItem -Path $engineExtract -Recurse -Filter 'llama-server.exe' -File |
@@ -185,12 +217,12 @@ function Install-AtCodeEngine {
 
     $targetServer = Join-Path $EngineDir 'atcode-server.exe'
     try {
-        & $targetServer --version *> $null
+        & $targetServer --help *> $null
         if ($LASTEXITCODE -ne 0) { throw "exit code $LASTEXITCODE" }
     } catch {
         Fail 'The installed @code engine failed its verification check'
     }
-    Info "Verified engine: $targetServer"
+    Info 'Installed server'
 }
 
 function Add-AtCodeToPath {
@@ -199,7 +231,7 @@ function Add-AtCodeToPath {
         $env:Path = "$InstallDir$([IO.Path]::PathSeparator)$env:Path"
     }
     if ($env:ATCODE_NO_PATH_UPDATE -eq '1') {
-        Info "Add $InstallDir to PATH to run @code from any directory"
+        Info 'Add the @code command directory to PATH'
         return
     }
 
@@ -212,8 +244,12 @@ function Add-AtCodeToPath {
             "$InstallDir$([IO.Path]::PathSeparator)$userPath"
         }
         [Environment]::SetEnvironmentVariable('Path', $newUserPath, 'User')
-        Info "Added $InstallDir to your user PATH"
+        Info 'Added @code commands to PATH'
     }
+}
+
+function Install-TerminalBrowser {
+    return
 }
 
 if ([string]::IsNullOrWhiteSpace($env:USERPROFILE)) {
@@ -247,6 +283,7 @@ try {
         -Value "@echo off`r`n`"%~dp0@code.exe`" %*" -Encoding ASCII
     Set-Content -Path (Join-Path $InstallDir '@.cmd') `
         -Value "@echo off`r`n`"%~dp0@.exe`" %*" -Encoding ASCII
+    Install-VoiceHelper -PlatformName $Platform
 
     Install-RepositoryBinary `
         -SourceName "atcode-windows-command-runner-$Platform.exe" `
@@ -268,13 +305,13 @@ try {
         Install-AtCodeEngine -Architecture $Architecture
     }
     Add-AtCodeToPath
+    Install-TerminalBrowser
 
     if (-not (Get-Command 'npx' -ErrorAction SilentlyContinue)) {
         Warn 'Node.js 18+ is recommended for built-in MCP and browser automation tools'
     }
     Write-Host ''
-    Info 'Installation complete. Run "atcode" or "at".'
-    Info 'In cmd.exe, "@code" and "@" are also available.'
+    Info 'Installation complete. Type "atcode" to start.'
     Info 'On first run, @code downloads its local model.'
 } finally {
     if (Test-Path $TempDir) {

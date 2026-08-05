@@ -24,14 +24,18 @@ Then just type:
 @
 ```
 
-`@code`, `atcode`, and `at` also work. On Windows PowerShell, use `atcode` or
-`at`: PowerShell reserves a leading `@` as language syntax. In `cmd.exe`,
-`@code` and `@` are available too.
+On macOS, Linux, and WSL, `@code` and `atcode` also work. On Windows
+PowerShell, type `atcode`: PowerShell reserves a leading `@` as language
+syntax. The `at` command remains available as a compatibility alias.
 
 The installer verifies every download, installs the platform sandbox helpers,
 and places the inference runtime under the generic
 `~/.atcode/engine/atcode-server` name. Existing installations using the older
 runtime layout are migrated without deleting models or settings.
+
+When a verified native voice helper is published for the detected platform,
+the installer adds it automatically. Otherwise the core @code installation
+continues normally and voice can be set up later.
 
 ## Repository layout
 
@@ -50,6 +54,11 @@ runtime layout are migrated without deleting models or settings.
 - ~4.8 GB free disk space (binary + model)
 - macOS 12+, Windows 10+ (64-bit), or a modern Linux distribution
 - Node.js 18+ is recommended for the built-in MCP and browser automation tools
+
+The installer also sets up `terminal-browser` when the upstream distribution
+supports the host. On Linux, Windows, Intel macOS, and WSL it silently skips
+that optional integration and keeps the existing browser tools available. Set
+`ATCODE_SKIP_TERMINAL_BROWSER=1` to skip the setup everywhere.
 
 ## Support
 
